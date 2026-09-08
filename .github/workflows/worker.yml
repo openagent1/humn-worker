@@ -1,0 +1,93 @@
+name: HUMN Data Worker
+
+# Public repo -> standard runners are free (verified 2026-09-06).
+# No data or secrets live in this repo; data flows remote->worker->remote.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: 'Job spec path in this repo (e.g. specs/job.yaml)'
+        required: true
+        type: string
+      max_chunks:
+        description: 'Cap chunks for this run (optional)'
+        required: false
+        type: string
+      soft_deadline_min:
+        description: 'Minutes until clean checkpoint+exit'
+        required: false
+        type: string
+        default: '150'
+
+concurrency:
+  group: humn-worker-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170   # hard stop below the 6h job limit; 20m margin for upload
+    env:
+      WORKER_RUN: gh-${{ github.run_id }}
+      HF_TOKEN_RO: ${{ secrets.HF_TOKEN_RO }}
+      HF_TOKEN_RW: ${{ secrets.HF_TOKEN_RW }}
+      SOFT_DEADLINE_MIN: ${{ inputs.soft_deadline_min || '150' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Install worker deps
+        run: pip install -r worker/requirements.txt
+
+      - name: Show plan (no secrets)
+        run: |
+          echo "spec: ${{ inputs.spec }}"
+          echo "max_chunks: ${{ inputs.max_chunks || 'all' }}"
+          python - <<'EOF'
+          import yaml, sys
+          spec = yaml.safe_load(open('${{ inputs.spec }}', encoding='utf-8'))
+          print('job_id:', spec['job_id'])
+          print('task:', spec['task'])
+          print('data_source:', spec['data_source']['repo'], spec['data_source'].get('config'))
+          creds = spec.get('credentials') or {}
+          for k, v in creds.items():
+              assert str(v).startswith(('keyring:', 'env:', 'ghsecret:')), f'literal secret in {k}!'
+              print(f'credential {k}: {v} (reference only)')
+          assert spec['output'].get('private', True) is True, 'output must be private'
+          print('spec validation: OK')
+          EOF
+
+      - name: Run worker
+        run: |
+          python worker/run_worker.py \
+            --spec "${{ inputs.spec }}" \
+            --workdir "$RUNNER_TEMP/humn-work" \
+            ${{ inputs.max_chunks && format('--max-chunks {0}', inputs.max_chunks) || '' }}
+
+      - name: Collect manifest + logs (small artifacts only)
+        if: always()
+        run: |
+          mkdir -p out
+          for f in "$RUNNER_TEMP/humn-work"/*/manifest.json; do
+            [ -e "$f" ] || continue
+            jobdir=$(dirname "$f")
+            cp "$f" "out/$(basename "$jobdir")-manifest.json"
+          done
+          ls -la out || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-${{ github.run_id }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
