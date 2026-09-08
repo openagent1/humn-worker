@@ -53,10 +53,6 @@ jobs:
       - name: Install worker deps
         run: pip install -r worker/requirements.txt
 
-      - name: Install fasttext (classify jobs only)
-        if: contains(matrix.spec, 'classify')
-        run: pip install fasttext || pip install fasttext-wheel || echo "fasttext unavailable; job will fail (allowed)"
-
       - name: Run worker
         run: python worker/run_worker.py --spec "${{ matrix.spec }}" --workdir "$RUNNER_TEMP/humn-work"
 
