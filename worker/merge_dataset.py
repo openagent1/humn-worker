@@ -35,6 +35,7 @@ ATTRIBUTIONS = {
     "HuggingFaceFW/fineweb-2": ("ODC-By 1.0", "https://huggingface.co/datasets/HuggingFaceFW/fineweb-2"),
     "CohereLabs/aya_dataset": ("Apache-2.0", "https://huggingface.co/datasets/CohereLabs/aya_dataset"),
     "OPUS/OpenSubtitles-v2024": ("ODC-By 1.0 (distributor claim, takedown policy applies)", "https://opus.nlpl.eu"),
+    "humn_curated": ("CC-BY-4.0 via contributor grant (see curated/TEMPLATE.jsonl)", "humn_curated"),
 }
 
 CARD = """---
@@ -73,6 +74,10 @@ Slang, typos, emoji, dialects kept AS-IS (natural > perfect).
 ## Language mix (top labels found in the data)
 
 {langmix}
+
+## Quality stats (measured during this build)
+
+{quality}
 
 ## Sources & Licenses
 
@@ -159,6 +164,10 @@ LANG_MAP = {
     "ary": "ar_maghrebi", "aeb": "ar_maghrebi", "acm": "ar_gulf",
     "ar": "ar_msa", "Arabic": "ar_msa", "ara": "ar_msa",
     "en": "en", "eng": "en", "eng_Latn": "en", "English": "en",
+    # identity: our own split names pass through (curated rows, re-merges)
+    "ar_eg": "ar_eg", "ar_msa": "ar_msa", "ar_levant": "ar_levant",
+    "ar_gulf": "ar_gulf", "ar_maghrebi": "ar_maghrebi", "arabizi": "arabizi",
+    "mixed": "mixed",
 }
 
 
@@ -182,6 +191,95 @@ def make_id(*parts: str) -> str:
 
 def empty_flags() -> dict:
     return {"political": False, "toxic": False, "spam": False, "low_info": False}
+
+
+# ---- v1 quality flags (lexicon heuristics; labels, never deletes) ----
+# NOTE: heuristic v0 flags. A transformer-based pass (dehatebert-mono-arabic
+# for Arabic, Detoxify-multilingual for the rest) is planned for v1.1.
+
+_AR_DIACRITICS = "".join(chr(c) for c in range(0x064B, 0x0656)) + "ـ"
+
+POLITICAL_HITS = frozenset("""
+حرب ثورة نظام احتلال مقاومة طائفية حزب انتخابات رئيس مرسي سيسي أسد سوريا اليمن فلسطين غزة إسرائيل إيران حزب الله داعش إخوان
+war revolution regime occupation resistance sectarian election president war crime sanctions invasion army militia putin zelensky trump biden netanyahu hamas hezbollah isis
+""".split())
+
+TOXIC_HITS = frozenset("""
+كلب حقير قذر زبالة غبي متخلف عبيط يلعن حيوان وسخ قحبة شرموطة كس عرص خول منيوك
+stupid idiot dumb hate kill yourself kys fuck shit bitch whore slut retard moron trash hate you ugly die
+""".split())
+
+SPAM_HITS = frozenset("""
+خصم عرض حصري اضغط الرابط ربح مجاني اشترك الآن تابعني فولو لايك كسب المال ربح سريع
+discount offer exclusive click link free win subscribe follow like earn money crypto giveaway promo code limited offer buy now
+http:// https:// t.me/ whatsapp
+""".split())
+
+
+def normalize_text(t: str) -> str:
+    """Aggressive normalization for near-dup detection (NOT stored)."""
+    import re
+    import unicodedata
+
+    t = t.lower()
+    t = "".join(c for c in t if c not in _AR_DIACRITICS)
+    t = unicodedata.normalize("NFKC", t)
+    t = re.sub(r"https?://\S+|@\w+|#\w+", " ", t)
+    t = re.sub(r"(.)\1{3,}", r"\1\1", t)  # هههههه -> هه , !!!!!! -> !!
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def flag_text(t: str) -> dict:
+    """Lexicon-based quality flags. Fast, dependency-free, heuristic."""
+    low = t.lower()
+    words = set(low.split())
+    n = len(t)
+    letters = sum(1 for c in t if c.isalpha())
+    flags = {
+        "political": bool(words & POLITICAL_HITS),
+        "toxic": bool(words & TOXIC_HITS),
+        "spam": bool(words & SPAM_HITS),
+        "low_info": (n < 15 or (n > 0 and letters / n < 0.3)),
+    }
+    return flags
+
+
+def has_emoji(t: str) -> bool:
+    return any(0x1F300 <= ord(c) or 0x2600 <= ord(c) <= 0x27BF or ord(c) == 0xFE0F
+               for c in t)
+
+
+CURATED_DIALECTS = frozenset(
+    ["ar_eg", "ar_msa", "ar_levant", "ar_gulf", "ar_maghrebi", "arabizi", "en", "mixed"])
+CURATED_REGISTERS = frozenset(
+    ["social", "humor", "sarcasm", "story", "qa", "advice", "dialogue", "knowledge"])
+
+
+def validate_curated_line(line: str, lineno: int) -> dict | None:
+    """Validate one curated line. Returns normalized dict or None (skip)."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None  # comments/blank: skip silently
+    try:
+        d = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"  [curated:{lineno}] skip: not valid JSON")
+        return None
+    for k in ("prompt", "response", "dialect", "register"):
+        if k not in d:
+            print(f"  [curated:{lineno}] skip: missing key '{k}'")
+            return None
+    if not isinstance(d["response"], str) or len(d["response"]) < 10:
+        print(f"  [curated:{lineno}] skip: response too short")
+        return None
+    if d["dialect"] not in CURATED_DIALECTS:
+        print(f"  [curated:{lineno}] skip: bad dialect '{d['dialect']}'")
+        return None
+    if d["register"] not in CURATED_REGISTERS:
+        print(f"  [curated:{lineno}] skip: bad register '{d['register']}'")
+        return None
+    return d
 
 
 def _extract_text(row: dict) -> str | None:
@@ -222,6 +320,10 @@ def main() -> int:
                     help="write per-language pretrain_<lang>/ dirs instead of one pretrain/ dir")
     ap.add_argument("--include-raw", action="store_true", default=False,
                     help="also publish raw/<job>/ provenance dumps (default: slim release without them)")
+    ap.add_argument("--flag-content", action=argparse.BooleanOptionalAction, default=True,
+                    help="lexicon-based quality flags (political/toxic/spam/low_info); labels, never deletes")
+    ap.add_argument("--curated", default=None,
+                    help="path to curated JSONL (prompt/response/dialect/register per TEMPLATE) merged as source humn_curated")
     args = ap.parse_args()
 
     token = args.token or __import__("os").environ.get("HUMN_OUT_TOKEN") or __import__("os").environ.get("HF_TOKEN_RW")
@@ -256,6 +358,26 @@ def main() -> int:
     conv_source: dict[str, str] = {}
     lang_counter: Counter = Counter()     # language mix stats
     used_sources: set[str] = set()
+    # v1 quality stats
+    seen_norm: set[str] = set()
+    n_norm_dup = 0
+    flag_counter: Counter = Counter()
+    _char_sum = 0
+    _char_n = 0
+    _emoji_rows = 0
+    _url_rows = 0
+    _len_reservoir: list[int] = []
+
+    def bump_stats(t: str) -> None:
+        nonlocal _char_sum, _char_n, _emoji_rows, _url_rows
+        _char_sum += len(t)
+        _char_n += 1
+        if has_emoji(t):
+            _emoji_rows += 1
+        if "http" in t or "t.me/" in t:
+            _url_rows += 1
+        if len(_len_reservoir) < 20000:
+            _len_reservoir.append(len(t))
 
     def pretrain_writer(split: str) -> ShardWriter:
         if split not in pretrain_writers:
@@ -309,7 +431,7 @@ def main() -> int:
             continue
         manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
         done = [c for c in manifest["chunks"] if c["status"] == "done"]
-        src_repo = spec["data_source"]["repo"]
+        src_repo = spec["data_source"].get("repo") or spec["data_source"].get("url", "unknown")
         if src_repo in excluded:
             print(f"[excluded] {job_id} ({src_repo}) — purged from this release")
             continue
@@ -354,20 +476,35 @@ def main() -> int:
                     content = row.get("content")
                     conv_id = row.get("parent_conversation_id") or row.get("parent_id")
                     if isinstance(role, str) and isinstance(content, str) and conv_id:
-                        conversations.setdefault(str(conv_id), []).append(
-                            (row.get("_turn_idx", 0), role, content,
-                             row.get("language") or row.get("lang")))
+                        key = (row.get("_turn_idx", 0), role, content)
+                        turns = conversations.setdefault(str(conv_id), [])
+                        if key not in {(t[0], t[1], t[2]) for t in turns}:
+                            turns.append(
+                                (row.get("_turn_idx", 0), role, content,
+                                 row.get("language") or row.get("lang")))
                         conv_source[str(conv_id)] = src_repo
                     else:
                         t = _extract_text(row)
                         if isinstance(t, str) and t.strip():
+                            # normalized near-dup check (catches cross-chunk
+                            # dupes that exact matching misses: chunk_id differs)
+                            nkey = normalize_text(t)
+                            if nkey in seen_norm:
+                                n_norm_dup += 1
+                                continue
+                            seen_norm.add(nkey)
                             # classify jobs emit GlotLID `label`; extract jobs use lang fields
                             raw_lang = row.get("lang") or row.get("language") or row.get("label")
                             split = normalize_lang(raw_lang, spec_lang)
+                            flags = flag_text(t) if args.flag_content else empty_flags()
+                            for fk, fv in flags.items():
+                                if fv:
+                                    flag_counter[fk] += 1
+                            bump_stats(t)
                             pretrain_writer(split).write({
                                 "id": make_id(src_repo, t),
                                 "text": t, "source": src_repo, "lang": split,
-                                "flags": empty_flags(), "dup_group": None})
+                                "flags": flags, "dup_group": None})
                             split_counts[f"pretrain_{split}"] += 1
                             lang_counter[split] += 1
                         elif row.get("label"):
@@ -380,6 +517,27 @@ def main() -> int:
             composition.append(f"- raw/{job_id}/train.jsonl: {raw_n:,} rows ({src_repo})")
         composition.append(f"- job {job_id}: {n:,} rows merged ({src_repo})")
 
+    # ---- curated human contributions (source: humn_curated) ----
+    n_curated = n_curated_bad = 0
+    if args.curated:
+        cpath = Path(args.curated)
+        if not cpath.exists():
+            print(f"[error] curated file not found: {cpath}", file=sys.stderr)
+            return 1
+        with open(cpath, encoding="utf-8") as fh:
+            for i, line in enumerate(fh, 1):
+                d = validate_curated_line(line, i)
+                if d is None:
+                    n_curated_bad += 1
+                    continue
+                cid = f"curated-{make_id(d['prompt'], d['response'])}"
+                conversations.setdefault(cid, []).append((0, "user", d["prompt"], d["dialect"]))
+                conversations[cid].append((1, "assistant", d["response"], d["dialect"]))
+                conv_source[cid] = "humn_curated"
+                n_curated += 1
+        used_sources.add("humn_curated")
+        print(f"[curated] accepted={n_curated} skipped={n_curated_bad} from {cpath.name}")
+
     # emit grouped chat conversations (sorted by turn index) into per-lang splits
     n_chat = 0
     for conv_id, turns in conversations.items():
@@ -388,11 +546,17 @@ def main() -> int:
         if len(msgs) >= 2:
             chat_lang = next((lg for _, _, _, lg in turns if lg), None)
             split = normalize_lang(chat_lang, None)
+            full_text = "\n".join(m["content"] for m in msgs)
+            flags = flag_text(full_text) if args.flag_content else empty_flags()
+            for fk, fv in flags.items():
+                if fv:
+                    flag_counter[f"chat_{fk}"] += 1
+            bump_stats(full_text)
             chat_writer(split).write({
                 "id": make_id(conv_source[conv_id], conv_id),
                 "conversation_id": conv_id, "messages": msgs,
                 "source": conv_source[conv_id], "lang": split,
-                "flags": empty_flags()})
+                "flags": flags})
             n_chat += 1
             split_counts[f"sft_chat_{split}"] += 1
             lang_counter[f"chat:{split}"] += 1
@@ -403,9 +567,17 @@ def main() -> int:
         files = w.close()
         split_files[f"{prefix}_{split}"] = files
     total_rows = sum(split_counts.values())
-    print(f"\n[merged] {total_rows:,} canonical rows, {n_dup:,} duplicates removed")
+    avg_chars = _char_sum / _char_n if _char_n else 0
+    med_chars = sorted(_len_reservoir)[len(_len_reservoir) // 2] if _len_reservoir else 0
+    total_in = total_rows + n_dup + n_norm_dup
+    print(f"\n[merged] {total_rows:,} canonical rows "
+          f"(exact-dup removed: {n_dup:,}, normalized near-dup removed: {n_norm_dup:,})")
     for split in sorted(split_counts):
         print(f"  {split}: {split_counts[split]:,} rows")
+    print(f"[quality] avg_len={avg_chars:.0f} chars, median_len~{med_chars}, "
+          f"emoji_rows={_emoji_rows:,}, url_rows={_url_rows:,}")
+    if flag_counter:
+        print("[flags] " + ", ".join(f"{k}={v:,}" for k, v in flag_counter.most_common()))
 
     for split in sorted(split_counts):
         composition.append(f"- {split}/train-*.jsonl: {split_counts[split]:,} rows")
@@ -424,9 +596,21 @@ def main() -> int:
     size_cat = "<1K" if total_rows < 1_000 else "1K<n<10K" if total_rows < 10_000 else \
                "10K<n<100K" if total_rows < 100_000 else "100K<n<1M" if total_rows < 1_000_000 else "1M<n<10M"
     langmix_txt = "\n".join(f"- {k}: {v:,}" for k, v in lang_counter.most_common(15)) or "- UNKNOWN"
+    quality_txt = (
+        f"- canonical rows: {total_rows:,}\n"
+        f"- exact duplicates removed: {n_dup:,}\n"
+        f"- normalized near-duplicates removed: {n_norm_dup:,}\n"
+        f"- avg text length: {avg_chars:.0f} chars (median ~{med_chars})\n"
+        f"- rows with emoji: {_emoji_rows:,} | rows with URLs: {_url_rows:,}\n"
+        + ("\n".join(f"- flagged {k}: {v:,}" for k, v in flag_counter.most_common())
+           if flag_counter else "- flags: none (flagging disabled)")
+        + "\n- methods: exact SHA match → NFKC/lowercase/diacritic-stripped near-dup; "
+          "lexicon heuristic flags v0 (transformer pass planned v1.1); "
+          "MinHash-LSH near-dup planned v1.1"
+    )
     card = CARD.format(version="v" + args.dataset_version.lstrip("v"),
                        size_cat=size_cat, composition="\n".join(composition),
-                       sources=sources_txt, langmix=langmix_txt)
+                       sources=sources_txt, langmix=langmix_txt, quality=quality_txt)
     card_p = workdir / "final" / "README.md"
     card_p.write_text(card, encoding="utf-8")
     print(f"[card] {card_p}")

@@ -1,0 +1,33 @@
+# HUMN curated contributions — TEMPLATE + RULES
+#
+# HOW TO CONTRIBUTE (for humans, in plain words):
+#   1. Copy one of the examples below into your own .jsonl file (one per line).
+#   2. Write PROMPT + RESPONSE in your own natural voice. Egyptian dialect
+#      encouraged. Typos, emoji, slang, Arabizi all ALLOWED (even wanted).
+#   3. Keep "dialect" honest: ar_eg / ar_msa / ar_levant / ar_gulf / ar_maghrebi / en / mixed.
+#   4. Keep "register" honest: social / humor / sarcasm / story / qa / advice / dialogue.
+#   5. No hate, no personal data (no real names, phones, addresses).
+#   6. Send the file to the maintainer. The merge validates schema and adds it
+#      as source "humn_curated" with full provenance.
+#
+# EXAMPLE 1 — Egyptian social Q&A:
+# {"prompt": "ليه الناس بتقول إن القاهرة مش بتنام؟", "response": "عشان بجد مش بتنام 😂 المحلات فاتحة والشوارع زحمة حتى الفجر، جرب تنزل وسط البلد الساعة 3 وهتفهم", "dialect": "ar_eg", "register": "social"}
+#
+# EXAMPLE 2 — advice:
+# {"prompt": "أذاكر إزاي وأنا بشتغل طول اليوم؟", "response": "بص، قسم وقتك 25 دقيقة مذاكرة و5 راحة، ومتذاكرش وانت مرهق عشان مخك مش هيستوعب. الثبات أهم من عدد الساعات", "dialect": "ar_eg", "register": "advice"}
+#
+# EXAMPLE 3 — humor:
+# {"prompt": "قول نكتة مصرية", "response": "مرة واحد اشترى تكييف... لقى الفاتورة محتاجة تكييف 😂", "dialect": "ar_eg", "register": "humor"}
+#
+# EXAMPLE 4 — code-switched dialogue:
+# {"prompt": "How do you say good morning in Egyptian?", "response": "صباح الخير or صباح الفل ya3ni... most people just say صباحو", "dialect": "mixed", "register": "dialogue"}
+#
+# EXAMPLE 5 — MSA knowledge:
+# {"prompt": "ما هي عاصمة مصر؟", "response": "القاهرة هي عاصمة جمهورية مصر العربية وأكبر مدنها.", "dialect": "ar_msa", "register": "qa"}
+#
+# VALIDATION RULES (enforced by merge --curated):
+#   - every line must be valid JSON with exactly: prompt, response, dialect, register
+#   - prompt and response: non-empty strings, response >= 10 chars
+#   - dialect in: ar_eg ar_msa ar_levant ar_gulf ar_maghrebi arabizi en mixed
+#   - register in: social humor sarcasm story qa advice dialogue knowledge
+#   - invalid lines are SKIPPED with a warning (never silently fixed)

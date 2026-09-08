@@ -1,4 +1,4 @@
-code_version: 0.3.0
+﻿code_version: 0.3.0
 chunking:
   strategy: file_shard
   chunk_rows: 50000
@@ -39,6 +39,7 @@ job_id: 2026-09-08-opensub-ar-en-sample-001
 task: sample_extract
 data_source:
   type: opus_zip
+  repo: OPUS/OpenSubtitles-v2024
   url: https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2024/moses/ar-en.txt.zip
   src_suffix: .ar
   tgt_suffix: .en
