@@ -295,7 +295,10 @@ def iter_rows_parquet(file_path: Path, columns: list[str] | None = None):
 
     if nested_list_cols:
         list_col = nested_list_cols[0]
-        parent_cols = [n for n in top_names if n != list_col]
+        # attach only SCALAR parent fields; list parents (moderation arrays,
+        # detoxify scores) would be duplicated once per turn = massive bloat
+        parent_cols = [n for n in top_names if n != list_col
+                       and not str(pf.schema_arrow.field(n).type).startswith("list<")]
         for batch in pf.iter_batches(batch_size=100):
             for rec in batch.to_pylist():
                 entries = rec.get(list_col) or []
@@ -344,11 +347,18 @@ def run_job(spec: dict, workdir: Path, progress: ProgressFn = print,
     checkpoint_repo = spec["checkpoint"]["repo"]
     manifest_path = workdir / "manifest.json"
 
-    files = (fetch_files_fn or hf_list_parquet_files)(ds["repo"], ds.get("config", ""), ds.get("split", "train"), token_ro)
+    if ds.get("type") == "opus_zip":
+        files = fetch_opus_shards(ds, spec, workdir, progress)
+    else:
+        files = (fetch_files_fn or hf_list_parquet_files)(ds["repo"], ds.get("config", ""), ds.get("split", "train"), token_ro)
     if not files:
-        raise RuntimeError(f"no parquet files found for {ds['repo']}/{ds.get('config')}")
+        raise RuntimeError(f"no input shards found for {ds.get('repo') or ds.get('url')}")
+    max_shards = spec.get("chunking", {}).get("max_shards")
+    if max_shards:
+        files = files[:max_shards]
+        progress(f"capped to first {max_shards} shards (spec max_shards)")
     chunk_ids = chunk_ids_from_files(files, spec["chunking"].get("chunk_rows", 50_000))
-    progress(f"found {len(files)} parquet shards -> {len(chunk_ids)} chunks")
+    progress(f"found {len(files)} input shards -> {len(chunk_ids)} chunks")
 
     if manifest_path.exists():
         manifest = load_manifest(manifest_path)
@@ -411,20 +421,100 @@ def run_job(spec: dict, workdir: Path, progress: ProgressFn = print,
     return manifest
 
 
+def fetch_opus_shards(ds: dict, spec: dict, workdir: Path, progress: ProgressFn = print) -> list:
+    """OPUS parallel-corpus zip (e.g. OpenSubtitles moses) -> local jsonl shards.
+
+    Downloads the zip ONCE, streams the largest *.{src}/{tgt} file pair
+    without extracting to disk, writes capped jsonl shards of paired rows:
+    {"text": ..., "lang": "ar"|"en"}. Deletes the zip afterwards.
+    """
+    import io
+    import zipfile
+
+    url = ds["url"]
+    src_sfx = ds.get("src_suffix", ".ar")
+    tgt_sfx = ds.get("tgt_suffix", ".en")
+    sample_lines = int(ds.get("sample_lines", 500000))
+    chunk_rows = int(spec.get("chunking", {}).get("chunk_rows", 50000))
+    zip_path = workdir / "opus_source.zip"
+    if not zip_path.exists():
+        progress(f"downloading OPUS zip ({url})")
+        hf_download(url, zip_path, None)
+    with zipfile.ZipFile(zip_path) as z:
+        names = z.namelist()
+        src_c = sorted([n for n in names if n.endswith(src_sfx)],
+                       key=lambda n: z.getinfo(n).file_size, reverse=True)
+        tgt_c = sorted([n for n in names if n.endswith(tgt_sfx)],
+                       key=lambda n: z.getinfo(n).file_size, reverse=True)
+        if not src_c or not tgt_c:
+            raise RuntimeError(
+                f"OPUS zip has no *{src_sfx}/*{tgt_sfx} pair (top entries: {names[:10]})")
+        s_name, t_name = src_c[0], tgt_c[0]
+        progress(f"OPUS pair: {s_name} + {t_name}")
+        out_dir = workdir / "opus_shards"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        shards: list = []
+        buf: list = []
+        idx = total = 0
+        with z.open(s_name) as fs, z.open(t_name) as ft:
+            fs_t = io.TextIOWrapper(fs, encoding="utf-8", errors="replace")
+            ft_t = io.TextIOWrapper(ft, encoding="utf-8", errors="replace")
+            for s_line, t_line in zip(fs_t, ft_t):
+                if total >= sample_lines:
+                    break
+                s_line, t_line = s_line.strip(), t_line.strip()
+                if s_line:
+                    buf.append({"text": s_line, "lang": src_sfx.lstrip(".")})
+                if t_line:
+                    buf.append({"text": t_line, "lang": tgt_sfx.lstrip(".")})
+                total += 1
+                if len(buf) >= chunk_rows:
+                    p = out_dir / f"shard-{idx:04d}.jsonl"
+                    with open(p, "w", encoding="utf-8") as f:
+                        for r in buf:
+                            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    shards.append(p)
+                    buf = []
+                    idx += 1
+            if buf:
+                p = out_dir / f"shard-{idx:04d}.jsonl"
+                with open(p, "w", encoding="utf-8") as f:
+                    for r in buf:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                shards.append(p)
+    zip_path.unlink(missing_ok=True)
+    progress(f"OPUS materialized {len(shards)} jsonl shards from ~{total:,} pairs")
+    return shards
+
+
 def _process_chunk(task: str, url: str, chunk_id: str, columns: list[str] | None,
                    workdir: Path, out_path: Path, token: str | None) -> int:
     """Download shard (cached), scan rows, emit task output jsonl. Local-light
     in dev mode: shard stays in workdir, never in the engine repo."""
     shard_dir = workdir / "shards"
-    shard_path = shard_dir / url.rsplit("/", 1)[-1]
-    if not shard_path.exists():
-        hf_download(url, shard_path, token)
+    # opus materialized shards are already local Paths: use directly
+    if isinstance(url, Path) or (isinstance(url, str) and Path(url).exists()):
+        shard_path = Path(url)
+    else:
+        shard_path = shard_dir / url.rsplit("/", 1)[-1]
+        if not shard_path.exists():
+            hf_download(url, shard_path, token)
 
     rows = 0
     out_path.parent.mkdir(parents=True, exist_ok=True)
     text_field = _pick_text_field(task)
+    if str(shard_path).endswith(".jsonl"):
+        def _jsonl_rows():
+            with open(shard_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        yield json.loads(line)
+        row_iter = _jsonl_rows()
+    else:
+        row_iter = iter_rows_parquet(shard_path, columns)
     with open(out_path, "w", encoding="utf-8") as out:
-        for row in iter_rows_parquet(shard_path, columns):
+        for row in row_iter:
             if task == "scan_parquet":
                 n_chars = sum(len(v) for v in row.values() if isinstance(v, str))
                 rec = {"chunk_id": chunk_id, "n_chars": n_chars, "n_fields": len(row)}

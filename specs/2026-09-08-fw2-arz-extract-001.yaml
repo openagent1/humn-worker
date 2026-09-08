@@ -1,0 +1,56 @@
+code_version: 0.3.0
+chunking:
+  strategy: file_shard
+  chunk_rows: 50000
+  expected_chunks: 2
+  max_shards: 2
+resources:
+  cpu: 4
+  ram_gb: 16
+  gpu: none
+  vram_gb: null
+  avg_tokens_per_doc: 300
+  estimated_runtime_min: 60
+  estimated_storage_gb: 2
+  estimated_network_gb: 3
+worker:
+  image: humn/worker-scan:0.3
+  models: []
+output:
+  type: hf_dataset
+  repo: humn-internal/social-register
+  format: jsonl
+  private: true
+  prefix: 2026-09-08-fw2-arz-extract-001
+checkpoint:
+  type: hf_dataset
+  repo: humn-internal/social-register-ckpt
+  manifest_path: manifest.json
+credentials:
+  hf_token_ro: env:HF_TOKEN_RO
+  hf_token_rw: env:HF_TOKEN_RW
+retry:
+  max_attempts: 3
+  backoff: exponential
+validation:
+  min_rows_per_chunk: 1
+  schema_match: true
+  checksum: sha256
+job_id: 2026-09-08-fw2-arz-extract-001
+task: sample_extract
+data_source:
+  type: huggingface_parquet
+  repo: HuggingFaceFW/fineweb-2
+  config: arz_Arab
+  split: train
+  columns:
+  - text
+  revision: main
+fallback_providers:
+- github
+- colab
+metadata:
+  objective_ref: configs/corpus-style.yaml
+  created_by: data-hunter
+  created_at: '2026-09-08'
+  lang: ar_eg

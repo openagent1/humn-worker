@@ -11,9 +11,13 @@ on:
         required: false
         default: 'auto'
       dataset_version:
-        description: 'Dataset version for auto naming + card (e.g. v0.2)'
+        description: 'Dataset version for auto naming + card'
         required: false
-        default: 'v0.3'
+        default: 'v1'
+      exclude_sources:
+        description: 'Comma-separated source repos to purge (LMSYS must stay here for public releases)'
+        required: false
+        default: 'lmsys/lmsys-chat-1m'
 
 permissions:
   contents: read
@@ -43,6 +47,7 @@ jobs:
             --workdir "$RUNNER_TEMP/humn-work" \
             --out-repo "${{ inputs.out_repo }}" \
             --dataset-version "${{ inputs.dataset_version }}" \
+            --exclude-sources "${{ inputs.exclude_sources }}" \
             --download \
             --upload \
             --token "$HF_TOKEN_RW"
