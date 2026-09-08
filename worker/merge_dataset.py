@@ -105,6 +105,13 @@ def main() -> int:
     composition: list[str] = []
     seen_texts: set[str] = set()
     n_dup = 0
+    # SFT/pretrain split
+    (workdir / "final").mkdir(parents=True, exist_ok=True)
+    pretrain_f = open(workdir / "final" / "train-pretrain.jsonl", "w", encoding="utf-8")
+    chat_f = open(workdir / "final" / "train-sft-chat.jsonl", "w", encoding="utf-8")
+    n_pretrain = n_chat = 0
+    conversations: dict[str, list] = {}   # conversation_id -> turns
+    conv_source: dict[str, str] = {}
 
     for spec_file in sorted(jobs_dir.glob("*.yaml")):
         with open(spec_file, encoding="utf-8") as f:
@@ -170,14 +177,49 @@ def main() -> int:
                     rec["source"] = src_repo
                     out.write(json.dumps(rec, ensure_ascii=False) + "\n")
                     n += 1
-                    if args.max_rows and len(all_rows) + n >= args.max_rows:
+                    # ---- SFT / pretrain routing ----
+                    row = rec.get("row", {})
+                    role = row.get("role")
+                    content = row.get("content")
+                    conv_id = row.get("parent_conversation_id") or row.get("parent_id")
+                    if isinstance(role, str) and isinstance(content, str) and conv_id:
+                        conversations.setdefault(str(conv_id), []).append(
+                            (row.get("_turn_idx", 0), role, content))
+                        conv_source[str(conv_id)] = src_repo
+                    else:
+                        t = row.get("text") or row.get("selftext") or row.get("tweet")
+                        if isinstance(t, str) and t.strip():
+                            lang = row.get("lang") or row.get("language")
+                            pretrain_f.write(json.dumps(
+                                {"text": t, "source": src_repo,
+                                 **({"lang": lang} if lang else {})},
+                                ensure_ascii=False) + "\n")
+                            n_pretrain += 1
+                    if args.max_rows and n >= args.max_rows:
                         break
         out.write("") if False else None
         composition.append(f"- {out_name}: {n:,} rows ({src_repo})")
         all_rows.append({"file": out_name, "rows": n})
 
     total = sum(r["rows"] for r in all_rows)
+
+    # emit grouped chat conversations (sorted by turn index)
+    for conv_id, turns in conversations.items():
+        turns.sort(key=lambda t: t[0])
+        msgs = [{"role": r, "content": c} for _, r, c in turns if r in ("user", "assistant")]
+        if len(msgs) >= 2:
+            chat_f.write(json.dumps({"conversation_id": conv_id, "messages": msgs,
+                                     "source": conv_source[conv_id]}, ensure_ascii=False) + "\n")
+            n_chat += 1
+    pretrain_f.close()
+    chat_f.close()
     print(f"\n[merged] {total:,} rows, {n_dup:,} duplicates removed")
+    print(f"[split]  pretrain: {n_pretrain:,} texts | sft-chat: {n_chat:,} conversations")
+
+    if n_pretrain:
+        composition.append(f"- train-pretrain.jsonl: {n_pretrain:,} texts (raw social text, register preserved)")
+    if n_chat:
+        composition.append(f"- train-sft-chat.jsonl: {n_chat:,} multi-turn conversations (role-labeled)")
 
     # dataset card
     sources_txt = "\n".join(
@@ -193,8 +235,13 @@ def main() -> int:
         if not token:
             print("[error] no HF token for upload", file=sys.stderr)
             return 1
+        from worker_core import hf_upload_file
         for r in all_rows:
             hf_upload_file(args.out_repo, workdir / "final" / r["file"], r["file"], token)
+        for extra in ("train-pretrain.jsonl", "train-sft-chat.jsonl"):
+            p = workdir / "final" / extra
+            if p.exists() and p.stat().st_size > 0:
+                hf_upload_file(args.out_repo, p, extra, token)
         hf_upload_file(args.out_repo, card_p, "README.md", token)
         print(f"\n[UPLOADED] https://huggingface.co/datasets/{args.out_repo}")
     else:

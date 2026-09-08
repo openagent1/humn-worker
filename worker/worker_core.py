@@ -198,35 +198,58 @@ def hf_upload_file(repo: str, local_path: Path, path_in_repo: str, token: str,
 # ---- chunk iteration ----
 
 
+_GLOTLID_CACHE: dict = {}
+
+
+def _load_glotlid(token: str | None, workdir: Path):
+    """Lazy-load GlotLID v3 (fasttext model, cis-lmu/glotlid, model_v3.bin)."""
+    if "model" in _GLOTLID_CACHE:
+        return _GLOTLID_CACHE["model"]
+    try:
+        import fasttext  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "classify_language needs fasttext: pip install fasttext "
+            "(works on the CI runner / Colab; on Windows it may need build tools)"
+        ) from e
+    from huggingface_hub import hf_hub_download  # type: ignore
+
+    path = hf_hub_download(repo_id="cis-lmu/glotlid", filename="model_v3.bin", token=_clean_token(token))
+    model = fasttext.load_model(path)
+    _GLOTLID_CACHE["model"] = model
+    return model
+
+
 def iter_rows_parquet(file_path: Path, columns: list[str] | None = None):
     """Yield row dicts from a parquet file. Requires pyarrow.
 
-    Handles one level of nesting: a schema whose columns are lists of structs
-    (e.g. {version, description, entries: [...]}) is flattened so each list
-    element is yielded as a row; scalar metadata columns are attached.
+    Flat schemas: optional column projection.
+    One level of nesting (a list<struct> column, e.g. WildChat `conversation`):
+    each list element is yielded as a row with its position (`_turn_idx`),
+    and sibling scalar columns of the parent row are attached with a
+    `parent_` prefix (e.g. parent_conversation_id).
     """
     import pyarrow.parquet as pq
 
     pf = pq.ParquetFile(str(file_path))
     top_names = pf.schema_arrow.names
-    # detect list columns (e.g. "list<item: struct(...)>")
-    nested_list_cols = [
-        n for n in top_names
-        if str(pf.schema_arrow.field(n).type).startswith("list<")
-    ]
+    nested_list_cols = [n for n in top_names if str(pf.schema_arrow.field(n).type).startswith("list<")]
+
     if nested_list_cols:
-        list_col = nested_list_cols[0]  # primary payload column
-        meta_cols = [n for n in top_names if n != list_col and n not in (columns or [])]
+        list_col = nested_list_cols[0]
+        parent_cols = [n for n in top_names if n != list_col]
         for batch in pf.iter_batches(batch_size=100):
             for rec in batch.to_pylist():
                 entries = rec.get(list_col) or []
-                for entry in entries:
+                for i, entry in enumerate(entries):
                     if isinstance(entry, dict):
                         out = dict(entry)
                     else:
                         out = {"value": entry}
-                    out[f"_{list_col}_len"] = len(entries)
-                    out.update({m: rec.get(m) for m in meta_cols})
+                    out["_turn_idx"] = i
+                    out["_list_len"] = len(entries)
+                    for m in parent_cols:
+                        out[f"parent_{m}"] = rec.get(m)
                     yield out
         return
 
@@ -298,7 +321,8 @@ def run_job(spec: dict, workdir: Path, progress: ProgressFn = print,
         save_manifest(manifest_path, recalc_stats(manifest))
 
         try:
-            out_path = workdir / job_id / f"{chunk_id}.jsonl"
+            # workdir already ends with job_id (run_worker appends it)
+            out_path = workdir / f"{chunk_id}.jsonl"
             rows = _process_chunk(task, url, chunk_id, ds.get("columns"), workdir, out_path, token_ro)
             checksum = sha256_file(out_path)
             c.update(status="done", rows=rows, sha256=checksum,
@@ -340,17 +364,27 @@ def _process_chunk(task: str, url: str, chunk_id: str, columns: list[str] | None
 
     rows = 0
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    text_field = _pick_text_field(task)
     with open(out_path, "w", encoding="utf-8") as out:
         for row in iter_rows_parquet(shard_path, columns):
             if task == "scan_parquet":
-                # generic: total chars across string fields (schema-agnostic)
                 n_chars = sum(len(v) for v in row.values() if isinstance(v, str))
                 rec = {"chunk_id": chunk_id, "n_chars": n_chars, "n_fields": len(row)}
             elif task == "sample_extract":
-                rec = {"chunk_id": chunk_id, "row": {k: str(v)[:2000] for k, v in row.items()}}
+                rec = {"chunk_id": chunk_id, "row": {k: (str(v)[:2000] if not isinstance(v, (int, float)) else v) for k, v in row.items()}}
+            elif task == "classify_language":
+                model = _load_glotlid(token, workdir)
+                text = str(row.get(text_field, "")).replace("\n", " ")[:512]
+                labels, probs = model.predict(text)
+                rec = {"chunk_id": chunk_id, "label": labels[0].replace("__label__", ""),
+                       "prob": round(float(probs[0]), 4), "n_chars": len(text)}
             else:
                 raise ValueError(f"worker task not implemented yet: {task}")
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
             rows += 1
     shard_path.unlink(missing_ok=True)  # delete shard after processing
     return rows
+
+
+def _pick_text_field(task: str) -> str:
+    return "text"  # classify jobs must set data_source.columns=[text] in spec
