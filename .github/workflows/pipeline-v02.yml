@@ -10,6 +10,10 @@ on:
         description: 'Output repo ("auto" = <you>/humn-social-register-v0.2)'
         required: false
         default: 'auto'
+      dataset_version:
+        description: 'Dataset version for auto naming + card'
+        required: false
+        default: 'v0.2'
 
 permissions:
   contents: read
@@ -109,6 +113,7 @@ jobs:
             --jobs-dir specs \
             --workdir "$RUNNER_TEMP/humn-work" \
             --out-repo "${{ inputs.out_repo == 'auto' && 'auto' || inputs.out_repo }}" \
+            --dataset-version "${{ inputs.dataset_version }}" \
             --download \
             --upload \
             --token "$HF_TOKEN_RW"

@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       out_repo:
-        description: 'Output dataset repo ("auto" = <your-username>/humn-social-register-v0.1)'
+        description: 'Output dataset repo ("auto" = <your-username>/humn-social-register-<version>)'
         required: false
         default: 'auto'
+      dataset_version:
+        description: 'Dataset version for auto naming + card (e.g. v0.2)'
+        required: false
+        default: 'v0.2'
 
 permissions:
   contents: read
@@ -38,6 +42,7 @@ jobs:
             --jobs-dir specs \
             --workdir "$RUNNER_TEMP/humn-work" \
             --out-repo "${{ inputs.out_repo }}" \
+            --dataset-version "${{ inputs.dataset_version }}" \
             --download \
             --upload \
             --token "$HF_TOKEN_RW"

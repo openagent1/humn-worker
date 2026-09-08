@@ -52,7 +52,7 @@ tags:
   - human-written
 ---
 
-# HUMN Social Register Corpus v0.1
+# HUMN Social Register Corpus {version}
 
 Natural human internet/chat text for HUMN. Slang, typos, emoji, dialects kept
 AS-IS (natural > perfect). Not cleaned, not normalized.
@@ -80,7 +80,9 @@ def main() -> int:
     ap.add_argument("--jobs-dir", required=True)
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--out-repo", required=True,
-                    help="e.g. yourname/humn-social-register-v0.1, or 'auto'")
+                    help="e.g. yourname/humn-social-register-v0.2, or 'auto'")
+    ap.add_argument("--dataset-version", default="v0.2",
+                    help="used for auto repo naming + dataset card title")
     ap.add_argument("--token", default=None, help="HF write token (or env HUMN_OUT_TOKEN)")
     ap.add_argument("--max-rows", type=int, default=None)
     ap.add_argument("--download", action="store_true",
@@ -95,7 +97,8 @@ def main() -> int:
             return 1
         from worker_core import hf_whoami
         user = hf_whoami(token)
-        args.out_repo = f"{user}/humn-social-register-v0.1"
+        ver = args.dataset_version.lstrip("v")
+        args.out_repo = f"{user}/humn-social-register-v{ver}"
         print(f"[auto] output repo: {args.out_repo}")
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +229,8 @@ def main() -> int:
         f"- {repo} — {lic} — {url}" for repo, (lic, url) in ATTRIBUTIONS.items())
     size_cat = "<1K" if total < 1_000 else "1K<n<10K" if total < 10_000 else \
                "10K<n<100K" if total < 100_000 else "100K<n<1M" if total < 1_000_000 else "1M<n<10M"
-    card = CARD.format(size_cat=size_cat, composition="\n".join(composition), sources=sources_txt)
+    card = CARD.format(version="v" + args.dataset_version.lstrip("v"),
+                       size_cat=size_cat, composition="\n".join(composition), sources=sources_txt)
     card_p = workdir / "final" / "README.md"
     card_p.write_text(card, encoding="utf-8")
     print(f"[card] {card_p}")
