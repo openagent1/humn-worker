@@ -73,6 +73,13 @@ def _now() -> str:
 # ---- HF HTTP API helpers (no SDK dependency; token optional for public repos) ----
 
 
+def _clean_token(token: str | None) -> str | None:
+    """Empty string tokens (unset GH secrets) are treated as anonymous."""
+    if token is None or str(token).strip() == "":
+        return None
+    return token.strip()
+
+
 def hf_list_parquet_files(repo: str, config: str, split: str = "train", token: str | None = None) -> list[str]:
     """List parquet shard filenames via the datasets-server /parquet endpoint.
 
@@ -100,26 +107,41 @@ def hf_download(url: str, dest: Path, token: str | None = None) -> Path:
     """Stream download with progress; returns local path."""
     import urllib.request
 
+    token = _clean_token(token)
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "humn-worker/0.1"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as out:
-        while True:
-            block = r.read(1 << 20)
-            if not block:
-                break
-            out.write(block)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as out:
+            while True:
+                block = r.read(1 << 20)
+                if not block:
+                    break
+                out.write(block)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode()[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(
+            f"download failed {e.code} for {url} "
+            f"(token: {'anon' if not token else token[:5] + '...'}) {body}"
+        ) from e
     return dest
 
 
 def hf_upload_file(repo: str, local_path: Path, path_in_repo: str, token: str,
                     repo_type: str = "dataset", create: bool = True) -> None:
-    """Upload one file to an HF repo using the HTTP commit API.
+    """Upload one file to an HF repo. Uses huggingface_hub (required dep).
 
-    Uses huggingface_hub when importable (recommended), otherwise a minimal
-    multipart commit implementation.
+    Raises RuntimeError with the actual HTTP error so CI logs show the cause.
     """
+    token = _clean_token(token)
+    if not token:
+        raise RuntimeError(
+            "no HF write token provided: set HF_TOKEN_RW secret (Settings > Secrets > Actions)")
     try:
         from huggingface_hub import HfApi  # type: ignore
 
@@ -129,45 +151,13 @@ def hf_upload_file(repo: str, local_path: Path, path_in_repo: str, token: str,
         api.upload_file(path_or_fileobj=str(local_path), path_in_repo=path_in_repo,
                         repo_id=repo, repo_type=repo_type)
         return
-    except ImportError:
-        pass
-    _hf_commit_multipart(repo, local_path, path_in_repo, token, repo_type, create)
-
-
-def _hf_commit_multipart(repo: str, local_path: Path, path_in_repo: str, token: str,
-                          repo_type: str, create: bool) -> None:
-    import urllib.request
-    import uuid
-
-    base = f"https://huggingface.co/api/{'datasets/' if repo_type == 'dataset' else ''}"
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": "humn-worker/0.1"}
-
-    if create:
-        req = urllib.request.Request(f"{base}repos/{repo}/create", data=json.dumps(
-            {"name": repo.split("/")[-1], "private": True, "type": repo_type}).encode(),
-            headers={**headers, "Content-Type": "application/json"}, method="POST")
-        try:
-            urllib.request.urlopen(req, timeout=60).read()
-        except Exception:
-            pass  # exists already
-
-    boundary = uuid.uuid4().hex
-    with open(local_path, "rb") as f:
-        payload = f.read()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="key"; filename="file"\r\n'
-        f"Content-Type: application/octet-stream\r\n\r\n"
-    ).encode() + payload + (
-        f"\r\n--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="path"\r\n\r\n{path_in_repo}\r\n'
-        f"--{boundary}--\r\n"
-    ).encode()
-    req = urllib.request.Request(
-        f"https://huggingface.co/{'datasets/' if repo_type == 'dataset' else ''}{repo}/commit/main",
-        data=body, headers={**headers, "Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST")
-    urllib.request.urlopen(req, timeout=300).read()
+    except ImportError as e:
+        raise RuntimeError("huggingface_hub not installed: pip install -r worker/requirements.txt") from e
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"HF upload failed for {repo}/{path_in_repo} "
+            f"(token starts: {token[:5]}..., error: {type(e).__name__}: {str(e)[:300]})"
+        ) from e
 
 
 # ---- chunk iteration ----
@@ -294,7 +284,12 @@ def run_job(spec: dict, workdir: Path, progress: ProgressFn = print,
     manifest["updated_at"] = _now()
     save_manifest(manifest_path, manifest)
     if write_artifacts and token_rw:
-        hf_upload_file(checkpoint_repo, manifest_path, spec["checkpoint"].get("manifest_path", "manifest.json"), token_rw)
+        try:
+            hf_upload_file(checkpoint_repo, manifest_path, spec["checkpoint"].get("manifest_path", "manifest.json"), token_rw)
+        except RuntimeError as e:
+            progress(f"FINAL manifest upload failed: {e}")
+            progress("chunks were processed but artifacts could not be saved — check HF_TOKEN_RW secret")
+            return manifest
     progress(f"job {job_id}: {manifest['stats']['chunks_done']}/{manifest['stats']['chunks_total']} chunks done")
     return manifest
 

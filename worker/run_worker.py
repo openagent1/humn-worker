@@ -45,8 +45,8 @@ def main() -> int:
     workdir = Path(args.workdir) / spec["job_id"]
     workdir.mkdir(parents=True, exist_ok=True)
 
-    token_ro = None if args.dev else os.environ.get("HF_TOKEN_RO")
-    token_rw = None if (args.dev or args.no_artifacts) else os.environ.get("HF_TOKEN_RW")
+    token_ro = None if args.dev else (os.environ.get("HF_TOKEN_RO") or None)
+    token_rw = None if (args.dev or args.no_artifacts) else (os.environ.get("HF_TOKEN_RW") or None)
 
     deadline_min = int(os.environ.get("SOFT_DEADLINE_MIN", "45"))
     soft_deadline = time.time() + deadline_min * 60 if not args.dev else None
