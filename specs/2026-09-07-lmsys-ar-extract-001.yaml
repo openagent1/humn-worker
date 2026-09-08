@@ -13,7 +13,7 @@ data_source:
 chunking:
   strategy: file_shard
   chunk_rows: 50000
-  expected_chunks: 20
+  expected_chunks: 6
 
 resources:
   cpu: 4
@@ -22,7 +22,7 @@ resources:
   vram_gb: null
   estimated_runtime_min: 120
   estimated_storage_gb: 3
-  estimated_network_gb: 6
+  estimated_network_gb: 3
   avg_tokens_per_doc: 250
 
 worker:

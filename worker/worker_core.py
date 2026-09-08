@@ -115,26 +115,84 @@ def resolve_repo(repo: str, token: str | None) -> str:
 
 
 def hf_list_parquet_files(repo: str, config: str, split: str = "train", token: str | None = None) -> list[str]:
-    """List parquet shard filenames via the datasets-server /parquet endpoint.
+    """List parquet shard files for a dataset.
 
-    The endpoint returns all splits; filter by the URL's split path segment.
+    1) datasets-server /parquet (public datasets) — filtered by split.
+    2) Fallback: repo tree API (gated/private datasets like lmsys-chat-1m
+       are NOT served by datasets-server; their parquet files live in the
+       repo itself and need the accepting account's token).
     """
-    import urllib.request
+    import urllib.error
     import urllib.parse
+    import urllib.request
 
+    token = _clean_token(token)
     url = (f"https://datasets-server.huggingface.co/parquet?dataset={urllib.parse.quote(repo, safe='')}"
            f"&config={urllib.parse.quote(config)}&split={urllib.parse.quote(split)}")
     req = urllib.request.Request(url, headers={"User-Agent": "humn-worker/0.1"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        data = json.loads(r.read().decode())
-    if "error" in data:
-        raise RuntimeError(f"datasets-server error: {data['error']}")
-    files = [f["url"] for f in data.get("parquet_files", [])]
-    if split:
-        files = [u for u in files if f"/{split}/" in u]
-    return files
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read().decode())
+        if "error" not in data:
+            files = [f["url"] for f in data.get("parquet_files", [])]
+            if split:
+                files = [u for u in files if f"/{split}/" in u]
+            if files:
+                return files
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403, 404):
+            raise
+    # no files via datasets-server -> gated/private: list the repo tree
+    return _hf_repo_parquet_urls(repo, token)
+
+
+def _hf_list_repo_parquet(repo: str, token: str | None, subpath: str = "", depth: int = 0) -> list[str]:
+    """Recursively list *.parquet file PATHS in a dataset repo via the tree API.
+
+    Returns bare repo paths (data/train-00000.parquet); the top-level caller
+    converts them to resolve URLs.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    if depth > 3:
+        return []
+    api = f"https://huggingface.co/api/datasets/{repo}/tree/main" + (f"/{urllib.parse.quote(subpath)}" if subpath else "")
+    req = urllib.request.Request(api, headers={"User-Agent": "humn-worker/0.1"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            entries = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError(
+                f"dataset {repo} is gated: log in on huggingface.co, open the dataset page, "
+                f"click 'Agree and access repository' with the account that owns this token"
+            ) from e
+        if e.code == 404:
+            return []
+        raise
+
+    paths: list[str] = []
+    for e in entries:
+        if e.get("type") == "directory":
+            paths += _hf_list_repo_parquet(repo, token, e["path"], depth + 1)
+        elif e.get("path", "").endswith(".parquet"):
+            paths.append(e["path"])
+    return sorted(paths)
+
+
+def _hf_repo_parquet_urls(repo: str, token: str | None) -> list[str]:
+    paths = _hf_list_repo_parquet(repo, token)
+    if not paths:
+        raise RuntimeError(
+            f"dataset {repo}: no .parquet files found in the repo tree (raw JSONL only — "
+            f"worker currently supports parquet sources)")
+    return [f"https://huggingface.co/datasets/{repo}/resolve/main/{p}" for p in paths]
 
 
 def hf_download(url: str, dest: Path, token: str | None = None) -> Path:
