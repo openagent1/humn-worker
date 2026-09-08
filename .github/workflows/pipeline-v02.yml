@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   extract:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 170
     strategy:
       fail-fast: false
@@ -24,16 +24,22 @@ jobs:
       matrix:
         include:
           - spec: specs/2026-09-07-wildchat-full-extract-001.yaml
+            os: ubuntu-latest
             allow_failure: false
           - spec: specs/2026-09-07-oasst2-full-extract-001.yaml
+            os: ubuntu-latest
             allow_failure: false
           - spec: specs/2026-09-07-reddit-jokes-extract-001.yaml
+            os: ubuntu-latest
             allow_failure: false
           - spec: specs/2026-09-07-aya-dialect-extract-001.yaml
+            os: ubuntu-latest
             allow_failure: false
           - spec: specs/2026-09-07-lmsys-ar-extract-001.yaml     # gated: needs agreement accepted
+            os: ubuntu-latest
             allow_failure: true
-          - spec: specs/2026-09-07-arz-glotlid-classify-001.yaml # needs fasttext
+          - spec: specs/2026-09-07-arz-glotlid-classify-001.yaml # fasttext builds on ubuntu-22.04
+            os: ubuntu-22.04
             allow_failure: true
     continue-on-error: ${{ matrix.allow_failure }}
     env:
@@ -52,6 +58,10 @@ jobs:
 
       - name: Install worker deps
         run: pip install -r worker/requirements.txt
+
+      - name: Install fasttext (classify jobs only)
+        if: contains(matrix.spec, 'classify')
+        run: pip install fasttext-wheel || pip install fasttext || echo "fasttext unavailable; job will fail (allowed)"
 
       - name: Run worker
         run: python worker/run_worker.py --spec "${{ matrix.spec }}" --workdir "$RUNNER_TEMP/humn-work"
