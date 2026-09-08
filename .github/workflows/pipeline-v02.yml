@@ -1,4 +1,4 @@
-name: HUMN v0.2 Pipeline (ALL IN ONE)
+﻿name: HUMN v0.2 Pipeline (ALL IN ONE)
 
 # ONE click: runs every extraction job in parallel, then merges everything,
 # builds pretrain + SFT-chat splits, publishes <you>/humn-social-register-v0.2.
@@ -13,7 +13,7 @@ on:
       dataset_version:
         description: 'Dataset version for auto naming + card'
         required: false
-        default: 'v0.2'
+        default: 'v0.3'
 
 permissions:
   contents: read

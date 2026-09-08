@@ -1,4 +1,4 @@
-name: HUMN Dataset Merge & Publish
+﻿name: HUMN Dataset Merge & Publish
 
 # One click: downloads all finished chunks from the checkpoint repo,
 # merges them, dedups, writes the dataset card, publishes to Hugging Face.
@@ -13,7 +13,7 @@ on:
       dataset_version:
         description: 'Dataset version for auto naming + card (e.g. v0.2)'
         required: false
-        default: 'v0.2'
+        default: 'v0.3'
 
 permissions:
   contents: read
