@@ -1,0 +1,118 @@
+name: HUMN v1 Pipeline (ALL IN ONE)
+
+# ONE click: extracts the 6 new v1 sources in parallel, then merges EVERYTHING
+# (old checkpoint data is reused automatically via --download, LMSYS is purged),
+# builds per-language splits + quality flags + stats, publishes humn-social-register-v1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      out_repo:
+        description: 'Output repo ("auto" = <you>/humn-social-register-v1)'
+        required: false
+        default: 'auto'
+      dataset_version:
+        description: 'Dataset version for auto naming + card'
+        required: false
+        default: 'v1'
+      exclude_sources:
+        description: 'Comma-separated source repos to purge from public release'
+        required: false
+        default: 'lmsys/lmsys-chat-1m'
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - spec: specs/2026-09-08-fw2-arz-extract-001.yaml
+            allow_failure: false
+          - spec: specs/2026-09-08-fw2-arb-sample-001.yaml
+            allow_failure: false
+          - spec: specs/2026-09-08-fw2-ary-full-001.yaml
+            allow_failure: false
+          - spec: specs/2026-09-08-fw2-ars-full-001.yaml
+            allow_failure: false
+          - spec: specs/2026-09-08-fw2-apc-full-001.yaml
+            allow_failure: false
+          - spec: specs/2026-09-08-opensub-ar-en-sample-001.yaml  # 2.5GB zip download, flakiest leg
+            allow_failure: true
+    continue-on-error: ${{ matrix.allow_failure }}
+    env:
+      WORKER_RUN: gh-${{ github.run_id }}-${{ strategy.job-index }}
+      HF_TOKEN_RO: ${{ secrets.HF_TOKEN_RO }}
+      HF_TOKEN_RW: ${{ secrets.HF_TOKEN_RW }}
+      SOFT_DEADLINE_MIN: '150'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Install worker deps
+        run: pip install -r worker/requirements.txt
+
+      - name: Run worker
+        run: python worker/run_worker.py --spec "${{ matrix.spec }}" --workdir "$RUNNER_TEMP/humn-work"
+
+      - name: Save manifest
+        if: always()
+        run: |
+          mkdir -p out
+          for f in "$RUNNER_TEMP/humn-work"/*/manifest.json; do
+            [ -e "$f" ] || continue
+            jobdir=$(dirname "$f")
+            cp "$f" "out/$(basename "$jobdir")-manifest.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-v1-${{ strategy.job-index }}-${{ github.run_id }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  publish:
+    needs: extract
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HF_TOKEN_RW: ${{ secrets.HF_TOKEN_RW }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Install deps
+        run: pip install -r worker/requirements.txt
+
+      - name: Merge + per-language splits + flags + publish v1
+        run: |
+          python worker/merge_dataset.py \
+            --jobs-dir specs \
+            --workdir "$RUNNER_TEMP/humn-work" \
+            --out-repo "${{ inputs.out_repo == 'auto' && 'auto' || inputs.out_repo }}" \
+            --dataset-version "${{ inputs.dataset_version }}" \
+            --exclude-sources "${{ inputs.exclude_sources }}" \
+            --download \
+            --upload \
+            --token "$HF_TOKEN_RW"
+
+      - name: Summary
+        run: echo "v1 published. Check your Hugging Face profile > Datasets."
