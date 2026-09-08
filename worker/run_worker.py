@@ -62,6 +62,11 @@ def main() -> int:
     stats = manifest["stats"]
     print(f"[done] {stats['chunks_done']}/{stats['chunks_total']} chunks, "
           f"{stats.get('rows_done', 0):,} rows")
+    incomplete = stats["chunks_done"] < stats["chunks_total"]
+    if incomplete:
+        print("[INCOMPLETE] green must mean DONE. Re-run the workflow — "
+              "it resumes automatically from the manifest.", file=sys.stderr)
+        return 2
     if stats["chunks_failed"]:
         print(f"[warn] {stats['chunks_failed']} chunks failed", file=sys.stderr)
         return 2

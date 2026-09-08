@@ -80,6 +80,40 @@ def _clean_token(token: str | None) -> str | None:
     return token.strip()
 
 
+_WHOAMI_CACHE: dict = {}
+
+
+def hf_whoami(token: str) -> str:
+    """Resolve the username that owns this token (cached)."""
+    token = _clean_token(token)
+    if not token:
+        raise RuntimeError("no HF token provided (HF_TOKEN_RO / HF_TOKEN_RW)")
+    if "user" in _WHOAMI_CACHE:
+        return _WHOAMI_CACHE["user"]
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://huggingface.co/api/whoami-v2",
+        headers={"Authorization": f"Bearer {token}", "User-Agent": "humn-worker/0.1"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read().decode())
+    name = data.get("name")
+    if not name:
+        raise RuntimeError(f"whoami failed (token starts {token[:5]}...): {str(data)[:200]}")
+    _WHOAMI_CACHE["user"] = name
+    return name
+
+
+def resolve_repo(repo: str, token: str | None) -> str:
+    """Rewrite the placeholder namespace 'humn-internal/*' to the token owner's
+    username: humn-internal/social-register-ckpt -> <you>/humn-social-register-ckpt.
+    Any other repo name passes through unchanged."""
+    if repo.startswith("humn-internal/"):
+        user = hf_whoami(token)
+        return f"{user}/humn-{repo[len('humn-internal/'):]}"
+    return repo
+
+
 def hf_list_parquet_files(repo: str, config: str, split: str = "train", token: str | None = None) -> list[str]:
     """List parquet shard filenames via the datasets-server /parquet endpoint.
 
@@ -142,6 +176,7 @@ def hf_upload_file(repo: str, local_path: Path, path_in_repo: str, token: str,
     if not token:
         raise RuntimeError(
             "no HF write token provided: set HF_TOKEN_RW secret (Settings > Secrets > Actions)")
+    repo = resolve_repo(repo, token)  # humn-internal/* -> <your-username>/humn-*
     try:
         from huggingface_hub import HfApi  # type: ignore
 

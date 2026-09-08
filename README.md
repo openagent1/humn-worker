@@ -23,6 +23,17 @@ standard runners (free for public repos — verified 2026-09-06).
 ## Dispatch a job
 
 From the Actions UI: *HUMN Data Worker* → *Run workflow* → pick spec.
+Data uploads under **your username** (the `humn-internal/*` namespace in
+specs is auto-rewritten to `<you>/humn-*` via the token's whoami).
+
+Exit codes: green = all chunks done + uploaded. red = incomplete → just
+Run workflow again, it resumes from the manifest.
+
+## Publish the final dataset
+
+When jobs are green: Actions → *HUMN Dataset Merge & Publish* → Run workflow
+(out_repo = `auto`). Downloads chunks, merges, dedups, writes the dataset
+card with license attributions, publishes `<you>/humn-social-register-v0.1`.
 
 Or from the local orchestrator:
 

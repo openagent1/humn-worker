@@ -79,13 +79,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs-dir", required=True)
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--out-repo", required=True, help="e.g. yourname/humn-social-register-v0.1")
+    ap.add_argument("--out-repo", required=True,
+                    help="e.g. yourname/humn-social-register-v0.1, or 'auto'")
     ap.add_argument("--token", default=None, help="HF write token (or env HUMN_OUT_TOKEN)")
     ap.add_argument("--max-rows", type=int, default=None)
+    ap.add_argument("--download", action="store_true",
+                    help="download finished chunks from the HF checkpoint repo")
     ap.add_argument("--upload", action="store_true", help="actually upload (default: dev, local only)")
     args = ap.parse_args()
 
-    token = args.token or __import__("os").environ.get("HUMN_OUT_TOKEN")
+    token = args.token or __import__("os").environ.get("HUMN_OUT_TOKEN") or __import__("os").environ.get("HF_TOKEN_RW")
+    if args.out_repo == "auto":
+        if not token:
+            print("[error] --out-repo auto needs a token to resolve your username", file=sys.stderr)
+            return 1
+        from worker_core import hf_whoami
+        user = hf_whoami(token)
+        args.out_repo = f"{user}/humn-social-register-v0.1"
+        print(f"[auto] output repo: {args.out_repo}")
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -102,8 +113,38 @@ def main() -> int:
             continue
         job_id = spec.get("job_id", spec_file.stem)
         manifest_p = workdir / job_id / "manifest.json"
+
+        if not manifest_p.exists() and args.download:
+            # pull manifest + done chunks from the (resolved) checkpoint repo
+            if not token:
+                print(f"[skip] {job_id}: --download needs a token", file=sys.stderr)
+                continue
+            from worker_core import resolve_repo
+            ckpt_repo = resolve_repo(spec["checkpoint"]["repo"], token)
+            try:
+                from huggingface_hub import hf_hub_download  # type: ignore
+                mpath = hf_hub_download(repo_id=ckpt_repo, filename="manifest.json",
+                                        repo_type="dataset", token=token)
+                manifest = json.loads(Path(mpath).read_text(encoding="utf-8"))
+                manifest_p.parent.mkdir(parents=True, exist_ok=True)
+                manifest_p.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+                for c in manifest["chunks"]:
+                    if c["status"] == "done":
+                        cp = hf_hub_download(repo_id=ckpt_repo,
+                                             filename=f"{job_id}/{c['chunk_id']}.jsonl",
+                                             repo_type="dataset", token=token)
+                        dst = workdir / job_id / f"{c['chunk_id']}.jsonl"
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        if not dst.exists():
+                            import shutil
+                            shutil.copy(cp, dst)
+                print(f"[download] {job_id}: chunks fetched from {ckpt_repo}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[skip] {job_id}: no remote checkpoint ({type(e).__name__}: {str(e)[:150]})")
+                continue
+
         if not manifest_p.exists():
-            print(f"[skip] {job_id}: no local manifest (job not run locally)")
+            print(f"[skip] {job_id}: no manifest (job not run)")
             continue
         manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
         done = [c for c in manifest["chunks"] if c["status"] == "done"]
