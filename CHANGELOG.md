@@ -1,6 +1,11 @@
 # HUMN Data Engine — CHANGELOG
 
 ## Unreleased (v1.0 target)
+- Sharded publishing: 3 merge legs (chat/social/web) stage into work repo,
+  finalize concatenates + publishes — no job runs long enough to time out
+- Hash-based dedup sets (20 bytes/row, ~50x less RAM than full-string sets)
+- OASST2 `prompter`→user role map (previously dropped silently); strict
+  conversation threading (parent_conversation_id only)
 - Canonical schemas: every row carries `id`, `source`, `lang`, `flags.*`, `dup_group`
 - Per-language release layout: `pretrain_<lang>/`, `sft_chat_<lang>/` (uniform schema per config)
 - `--exclude-sources`: compliance purge (LMSYS-derived rows never in public releases)

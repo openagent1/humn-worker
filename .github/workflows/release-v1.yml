@@ -1,0 +1,115 @@
+name: HUMN v1 Release (sharded, timeout-proof)
+
+# No single job runs long: 3 merge legs (minutes each) stage split dirs +
+# stats into the work repo, then finalize concatenates + publishes.
+# Re-running is always safe (idempotent uploads, manifest resume).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset_version:
+        description: 'Dataset version for auto naming + card'
+        required: false
+        default: 'v1'
+      exclude_sources:
+        description: 'Comma-separated source repos to purge from public release'
+        required: false
+        default: 'lmsys/lmsys-chat-1m'
+
+permissions:
+  contents: read
+
+jobs:
+  merge-leg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - leg: chat
+            jobs: 2026-09-07-wildchat-full-extract-001,2026-09-06-oasst2-ar-social-extract-001,2026-09-06-wildchat-social-extract-001,2026-09-07-oasst2-full-extract-001,2026-09-07-aya-dialect-extract-001
+          - leg: social
+            jobs: 2026-09-06-arsarcasm-social-extract-001,2026-09-07-reddit-jokes-extract-001
+          - leg: web
+            jobs: 2026-09-08-fw2-arz-extract-001,2026-09-07-arz-glotlid-classify-001,2026-09-08-fw2-arb-sample-001,2026-09-08-fw2-ary-full-001,2026-09-08-fw2-ars-full-001,2026-09-08-fw2-apc-full-001,2026-09-08-opensub-ar-en-sample-001
+    env:
+      WORKER_RUN: gh-${{ github.run_id }}-${{ matrix.leg }}
+      HF_TOKEN_RO: ${{ secrets.HF_TOKEN_RO }}
+      HF_TOKEN_RW: ${{ secrets.HF_TOKEN_RW }}
+      SOFT_DEADLINE_MIN: '100'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Install worker deps
+        run: pip install -r worker/requirements.txt
+
+      - name: Merge leg (${{ matrix.leg }})
+        run: |
+          python -u worker/merge_dataset.py \
+            --jobs-dir specs \
+            --workdir "$RUNNER_TEMP/humn-work" \
+            --only-jobs "${{ matrix.jobs }}" \
+            --out-repo auto-work \
+            --out-prefix "${{ matrix.leg }}" \
+            --save-stats "$RUNNER_TEMP/humn-work/stats-${{ matrix.leg }}.json" \
+            --exclude-sources "${{ inputs.exclude_sources }}" \
+            --download \
+            --upload \
+            --token "$HF_TOKEN_RW"
+
+      - name: Save manifest
+        if: always()
+        run: |
+          mkdir -p out
+          for f in "$RUNNER_TEMP/humn-work"/*/manifest.json; do
+            [ -e "$f" ] || continue
+            jobdir=$(dirname "$f")
+            cp "$f" "out/$(basename "$jobdir")-manifest.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-v1-${{ matrix.leg }}-${{ github.run_id }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  finalize:
+    needs: merge-leg
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HF_TOKEN_RW: ${{ secrets.HF_TOKEN_RW }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Install deps
+        run: pip install -r worker/requirements.txt
+
+      - name: Assemble + publish final release
+        run: |
+          python -u worker/finalize_release.py \
+            --work-repo auto-work \
+            --legs chat,social,web \
+            --out-repo auto \
+            --dataset-version "${{ inputs.dataset_version }}" \
+            --token "$HF_TOKEN_RW"
+
+      - name: Summary
+        run: echo "v1 released. Check your Hugging Face profile > Datasets."

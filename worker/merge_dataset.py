@@ -329,6 +329,12 @@ def main() -> int:
     ap.add_argument("--upload", action="store_true", help="actually upload (default: dev, local only)")
     ap.add_argument("--exclude-sources", default="",
                     help="comma-separated source repos to EXCLUDE (e.g. lmsys/lmsys-chat-1m for public releases)")
+    ap.add_argument("--only-jobs", default="",
+                    help="comma-separated job_ids to process (sharded merge legs); empty = all specs")
+    ap.add_argument("--out-prefix", default="",
+                    help="prefix for all upload paths, e.g. a leg name (work-repo staging); skips README upload")
+    ap.add_argument("--save-stats", default="",
+                    help="write build counters JSON here (also uploaded next to outputs when uploading)")
     ap.add_argument("--split-by-lang", action=argparse.BooleanOptionalAction, default=True,
                     help="write per-language pretrain_<lang>/ dirs instead of one pretrain/ dir")
     ap.add_argument("--include-raw", action="store_true", default=False,
@@ -349,6 +355,14 @@ def main() -> int:
         ver = args.dataset_version.lstrip("v")
         args.out_repo = f"{user}/humn-social-register-v{ver}"
         log(f"[auto] output repo: {args.out_repo}")
+    elif args.out_repo == "auto-work":
+        if not token:
+            log("[error] --out-repo auto-work needs a token to resolve your username", file=sys.stderr)
+            return 1
+        from worker_core import hf_whoami
+        user = hf_whoami(token)
+        args.out_repo = f"{user}/humn-v1-work"
+        log(f"[auto] work repo: {args.out_repo}")
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -356,6 +370,10 @@ def main() -> int:
     excluded = {s.strip() for s in args.exclude_sources.split(",") if s.strip()}
     if excluded:
         log(f"[exclude] dropping sources from public release: {sorted(excluded)}")
+    only = {j.strip() for j in args.only_jobs.split(",") if j.strip()}
+    if only:
+        log(f"[only-jobs] processing {len(only)} job(s): {sorted(only)}")
+    prefix = args.out_prefix.strip("/")
     composition: list[str] = []
     seen_texts: set[str] = set()
     n_dup = 0
@@ -413,6 +431,12 @@ def main() -> int:
         if not spec:
             continue
         job_id = spec.get("job_id", spec_file.stem)
+        if only and job_id not in only:
+            continue
+        src_repo = spec["data_source"].get("repo") or spec["data_source"].get("url", "unknown")
+        if src_repo in excluded:
+            log(f"[excluded] {job_id} ({src_repo}) — purged from this release")
+            continue
         manifest_p = workdir / job_id / "manifest.json"
 
         if not manifest_p.exists() and args.download:
@@ -450,10 +474,6 @@ def main() -> int:
             continue
         manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
         done = [c for c in manifest["chunks"] if c["status"] == "done"]
-        src_repo = spec["data_source"].get("repo") or spec["data_source"].get("url", "unknown")
-        if src_repo in excluded:
-            log(f"[excluded] {job_id} ({src_repo}) — purged from this release")
-            continue
         used_sources.add(src_repo)
         spec_lang = (spec.get("metadata") or {}).get("lang")
         log(f"[merge] {job_id}: {len(done)} chunks from {src_repo}"
@@ -616,6 +636,22 @@ def main() -> int:
     if args.include_raw:
         composition.append("- raw/<job_id>/train.jsonl: per-job source dumps (provenance)")
 
+    # stats file: machine-readable counters for finalize_release (sums across legs)
+    stats = {"split_counts": dict(split_counts),
+             "lang_counter": dict(lang_counter),
+             "flag_counter": dict(flag_counter),
+             "n_dup": n_dup, "n_norm_dup": n_norm_dup,
+             "total_rows": total_rows,
+             "used_sources": sorted(used_sources),
+             "avg_chars": round(avg_chars, 1), "median_chars": med_chars,
+             "emoji_rows": _emoji_rows, "url_rows": _url_rows}
+    stats_path = None
+    if args.save_stats:
+        stats_path = Path(args.save_stats)
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=1), encoding="utf-8")
+        log(f"[stats] {stats_path}")
+
     # dataset card — aggregate is ODC-By (required by ODC-By §4.2a for
     # derivative databases of ODC-By sources); per-source terms below.
     sources_txt = "\n".join(
@@ -652,15 +688,22 @@ def main() -> int:
             log("[error] no HF token for upload", file=sys.stderr)
             return 1
         from worker_core import hf_upload_file
-        # upload preserving relative paths: pretrain/, sft_chat/, raw/<job>/, README
+        # upload preserving relative paths, namespaced by --out-prefix for legs
         for rel in sorted((workdir / "final").rglob("*.jsonl")):
             rel_path = rel.relative_to(workdir / "final").as_posix()
             if rel.stat().st_size == 0:
                 log(f"  [skip empty] {rel_path}")
                 continue
-            hf_upload_file(args.out_repo, rel, rel_path, token)
-        hf_upload_file(args.out_repo, card_p, "README.md", token)
-        log(f"\n[UPLOADED] https://huggingface.co/datasets/{args.out_repo}")
+            up_path = f"{prefix}/{rel_path}" if prefix else rel_path
+            hf_upload_file(args.out_repo, rel, up_path, token)
+        if stats_path is not None and stats_path.exists():
+            up_stats = f"{prefix}/stats.json" if prefix else "stats.json"
+            hf_upload_file(args.out_repo, stats_path, up_stats, token)
+        if not prefix:
+            # legs never own the card; only the final release writes it
+            hf_upload_file(args.out_repo, card_p, "README.md", token)
+        log(f"\n[UPLOADED] https://huggingface.co/datasets/{args.out_repo}"
+            + (f" under {prefix}/" if prefix else ""))
     else:
         log(f"\n[dev] files ready in {workdir / 'final'} (no upload; add --upload --token <hf_write_token>)")
     return 0
