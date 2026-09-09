@@ -373,7 +373,7 @@ def main() -> int:
     only = {j.strip() for j in args.only_jobs.split(",") if j.strip()}
     if only:
         log(f"[only-jobs] processing {len(only)} job(s): {sorted(only)}")
-    prefix = args.out_prefix.strip("/")
+    UP_PREFIX = args.out_prefix.strip("/")  # upload namespace for legs; never reuse this name below
     composition: list[str] = []
     seen_texts: set[str] = set()
     n_dup = 0
@@ -615,9 +615,9 @@ def main() -> int:
     # close all writers, collect per-split file lists
     split_files: dict[str, list[Path]] = {}
     for split, w in list(pretrain_writers.items()) + list(chat_writers.items()):
-        prefix = "pretrain" if split in pretrain_writers else "sft_chat"
+        kind = "pretrain" if split in pretrain_writers else "sft_chat"
         files = w.close()
-        split_files[f"{prefix}_{split}"] = files
+        split_files[f"{kind}_{split}"] = files
     total_rows = sum(split_counts.values())
     avg_chars = _char_sum / _char_n if _char_n else 0
     med_chars = sorted(_len_reservoir)[len(_len_reservoir) // 2] if _len_reservoir else 0
@@ -694,16 +694,17 @@ def main() -> int:
             if rel.stat().st_size == 0:
                 log(f"  [skip empty] {rel_path}")
                 continue
-            up_path = f"{prefix}/{rel_path}" if prefix else rel_path
+            up_path = f"{UP_PREFIX}/{rel_path}" if UP_PREFIX else rel_path
+            log(f"  [upload] {up_path} ...")
             hf_upload_file(args.out_repo, rel, up_path, token)
         if stats_path is not None and stats_path.exists():
-            up_stats = f"{prefix}/stats.json" if prefix else "stats.json"
+            up_stats = f"{UP_PREFIX}/stats.json" if UP_PREFIX else "stats.json"
             hf_upload_file(args.out_repo, stats_path, up_stats, token)
-        if not prefix:
+        if not UP_PREFIX:
             # legs never own the card; only the final release writes it
             hf_upload_file(args.out_repo, card_p, "README.md", token)
         log(f"\n[UPLOADED] https://huggingface.co/datasets/{args.out_repo}"
-            + (f" under {prefix}/" if prefix else ""))
+            + (f" under {UP_PREFIX}/" if UP_PREFIX else ""))
     else:
         log(f"\n[dev] files ready in {workdir / 'final'} (no upload; add --upload --token <hf_write_token>)")
     return 0

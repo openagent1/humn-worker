@@ -49,6 +49,9 @@ def download_leg(work_repo: str, leg: str, dest: Path, token: str) -> list[Path]
     except Exception as e:  # noqa: BLE001
         print(f"[finalize] leg {leg}: cannot list {work_repo} ({e})", flush=True)
         return []
+    print(f"[finalize] leg {leg}: {len(files)} file(s) in {work_repo}", flush=True)
+    for f in sorted(files)[:5]:
+        print(f"[finalize] leg {leg}: sees {f}", flush=True)
     got = []
     for f in sorted(files):
         if not f.startswith(leg + "/"):
@@ -107,9 +110,16 @@ def main() -> int:
             print("[error] need a token to download legs", file=sys.stderr)
             return 1
         work_repo = resolve(args.work_repo, token, "work", args.dataset_version)
+        total_leg_files = 0
         for leg in legs:
             n = len(download_leg(work_repo, leg, parts_root, token))
             print(f"[finalize] leg {leg}: {n} files", flush=True)
+            total_leg_files += n
+        if total_leg_files == 0:
+            print("[error] downloaded ZERO files from all legs — refusing to publish "
+                  "an empty dataset. Check that merge legs uploaded under "
+                  "<leg>/ prefixes in the work repo.", file=sys.stderr)
+            return 1
 
     # concat per split dir (streaming, JSON-validated), merge stats
     final_dir = workdir / "final"
@@ -163,6 +173,10 @@ def main() -> int:
         w.close()
     total_rows = sum(split_counts.values()) or total_in
     print(f"[finalize] {total_rows:,} rows across {len(writers)} split dirs", flush=True)
+    if total_rows == 0:
+        print("[error] zero canonical rows assembled — refusing to publish "
+              "an empty dataset.", file=sys.stderr)
+        return 1
 
     # card
     sources_txt = "\n".join(
