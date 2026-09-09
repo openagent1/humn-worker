@@ -290,6 +290,10 @@ def validate_curated_line(line: str, lineno: int) -> dict | None:
     return d
 
 
+ROLE_MAP = {"prompter": "user", "human": "user", "user": "user",
+            "assistant": "assistant", "gpt": "assistant", "model": "assistant"}
+
+
 def _extract_text(row: dict) -> str | None:
     """Pull usable text from any known schema. Returns None if none found."""
     for key in ("text", "selftext", "tweet", "content", "body", "prompt"):
@@ -363,6 +367,11 @@ def main() -> int:
     pretrain_writers: dict[str, ShardWriter] = {}
     chat_writers: dict[str, ShardWriter] = {}
     split_counts: Counter = Counter()
+    import hashlib
+
+    def _h(s: str) -> bytes:
+        return hashlib.sha1(s.encode("utf-8", "replace")).digest()
+
     conversations: dict[str, list] = {}   # conversation_id -> turns
     conv_source: dict[str, str] = {}
     lang_counter: Counter = Counter()     # language mix stats
@@ -463,47 +472,55 @@ def main() -> int:
                 continue
             log(f"  [merge] {job_id}/{c['chunk_id']}.jsonl ...")
             with open(chunk_p, encoding="utf-8") as fh:
-                for line in fh:
+                for li, line in enumerate(fh):
+                    if li and li % 500000 == 0:
+                        log(f"    ... {li:,} lines into {c['chunk_id']}.jsonl")
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         n_dup += 1
                         continue
-                    text = json.dumps(rec, sort_keys=True)
-                    if text in seen_texts:
-                        n_dup += 1
-                        continue
-                    seen_texts.add(text)
                     rec["source"] = src_repo
-                    if raw_out is not None:
-                        raw_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                        raw_n += 1
-                    n += 1
                     # ---- canonical routing ----
                     row = rec.get("row", {})
                     if not isinstance(row, dict):
                         row = {"value": row}
-                    role = row.get("role")
+                    role = ROLE_MAP.get(str(row.get("role", "")).lower())
                     content = row.get("content")
-                    conv_id = row.get("parent_conversation_id") or row.get("parent_id")
-                    if isinstance(role, str) and isinstance(content, str) and conv_id:
+                    # strict chat rule: real conversation threading only
+                    # (parent_conversation_id + ordered turns). OASST2-style
+                    # parent_id rows go to pretrain as texts instead.
+                    conv_id = row.get("parent_conversation_id")
+                    if role in ("user", "assistant") and isinstance(content, str) and conv_id:
                         key = (row.get("_turn_idx", 0), role, content)
                         turns = conversations.setdefault(str(conv_id), [])
                         if key not in {(t[0], t[1], t[2]) for t in turns}:
                             turns.append(
                                 (row.get("_turn_idx", 0), role, content,
                                  row.get("language") or row.get("lang")))
+                            n += 1
+                            if raw_out is not None:
+                                raw_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                raw_n += 1
+                        else:
+                            n_dup += 1
                         conv_source[str(conv_id)] = src_repo
                     else:
                         t = _extract_text(row)
                         if isinstance(t, str) and t.strip():
-                            # normalized near-dup check (catches cross-chunk
-                            # dupes that exact matching misses: chunk_id differs)
-                            nkey = normalize_text(t)
-                            if nkey in seen_norm:
+                            # hash-based dedup: 20 bytes/row instead of full
+                            # strings (the old seen_texts set OOM-thrashed
+                            # the runner on v1-scale data -> timeout)
+                            eh = _h(t)
+                            if eh in seen_texts:
+                                n_dup += 1
+                                continue
+                            seen_texts.add(eh)
+                            nh = _h(normalize_text(t))
+                            if nh in seen_norm:
                                 n_norm_dup += 1
                                 continue
-                            seen_norm.add(nkey)
+                            seen_norm.add(nh)
                             # classify jobs emit GlotLID `label`; extract jobs use lang fields
                             raw_lang = row.get("lang") or row.get("language") or row.get("label")
                             split = normalize_lang(raw_lang, spec_lang)
@@ -518,6 +535,10 @@ def main() -> int:
                                 "flags": flags, "dup_group": None})
                             split_counts[f"pretrain_{split}"] += 1
                             lang_counter[split] += 1
+                            n += 1
+                            if raw_out is not None:
+                                raw_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                raw_n += 1
                         elif row.get("label"):
                             # classify-only rows (no text): validation stats, not training rows
                             lang_counter[f"label:{row['label']}"] += 1
