@@ -96,7 +96,7 @@ jobs:
     needs: extract
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 170
     env:
       HF_TOKEN_RW: ${{ secrets.HF_TOKEN_RW }}
     steps:
@@ -113,7 +113,7 @@ jobs:
 
       - name: Merge + build pretrain/SFT splits + publish v0.2
         run: |
-          python worker/merge_dataset.py \
+          python -u worker/merge_dataset.py \
             --jobs-dir specs \
             --workdir "$RUNNER_TEMP/humn-work" \
             --out-repo "${{ inputs.out_repo == 'auto' && 'auto' || inputs.out_repo }}" \

@@ -27,6 +27,14 @@ import yaml
 
 from worker_core import hf_download, hf_upload_file
 
+import builtins
+
+
+def log(m: str, **kw) -> None:
+    """Unbuffered print — GitHub Actions captures pipes with block buffering,
+    which made long silent stretches look like a hang. Always flush."""
+    builtins.print(m, flush=True, **kw)
+
 ATTRIBUTIONS = {
     "allenai/WildChat": ("ODC-By 1.0", "https://huggingface.co/datasets/allenai/WildChat"),
     "OpenAssistant/oasst2": ("Apache-2.0", "https://huggingface.co/datasets/OpenAssistant/oasst2"),
@@ -264,20 +272,20 @@ def validate_curated_line(line: str, lineno: int) -> dict | None:
     try:
         d = json.loads(line)
     except json.JSONDecodeError:
-        print(f"  [curated:{lineno}] skip: not valid JSON")
+        log(f"  [curated:{lineno}] skip: not valid JSON")
         return None
     for k in ("prompt", "response", "dialect", "register"):
         if k not in d:
-            print(f"  [curated:{lineno}] skip: missing key '{k}'")
+            log(f"  [curated:{lineno}] skip: missing key '{k}'")
             return None
     if not isinstance(d["response"], str) or len(d["response"]) < 10:
-        print(f"  [curated:{lineno}] skip: response too short")
+        log(f"  [curated:{lineno}] skip: response too short")
         return None
     if d["dialect"] not in CURATED_DIALECTS:
-        print(f"  [curated:{lineno}] skip: bad dialect '{d['dialect']}'")
+        log(f"  [curated:{lineno}] skip: bad dialect '{d['dialect']}'")
         return None
     if d["register"] not in CURATED_REGISTERS:
-        print(f"  [curated:{lineno}] skip: bad register '{d['register']}'")
+        log(f"  [curated:{lineno}] skip: bad register '{d['register']}'")
         return None
     return d
 
@@ -302,6 +310,7 @@ def _extract_text(row: dict) -> str | None:
 
 
 def main() -> int:
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs-dir", required=True)
     ap.add_argument("--workdir", required=True)
@@ -329,20 +338,20 @@ def main() -> int:
     token = args.token or __import__("os").environ.get("HUMN_OUT_TOKEN") or __import__("os").environ.get("HF_TOKEN_RW")
     if args.out_repo == "auto":
         if not token:
-            print("[error] --out-repo auto needs a token to resolve your username", file=sys.stderr)
+            log("[error] --out-repo auto needs a token to resolve your username", file=sys.stderr)
             return 1
         from worker_core import hf_whoami
         user = hf_whoami(token)
         ver = args.dataset_version.lstrip("v")
         args.out_repo = f"{user}/humn-social-register-v{ver}"
-        print(f"[auto] output repo: {args.out_repo}")
+        log(f"[auto] output repo: {args.out_repo}")
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
     jobs_dir = Path(args.jobs_dir)
     excluded = {s.strip() for s in args.exclude_sources.split(",") if s.strip()}
     if excluded:
-        print(f"[exclude] dropping sources from public release: {sorted(excluded)}")
+        log(f"[exclude] dropping sources from public release: {sorted(excluded)}")
     composition: list[str] = []
     seen_texts: set[str] = set()
     n_dup = 0
@@ -400,7 +409,7 @@ def main() -> int:
         if not manifest_p.exists() and args.download:
             # pull manifest + done chunks from the (resolved) checkpoint repo
             if not token:
-                print(f"[skip] {job_id}: --download needs a token", file=sys.stderr)
+                log(f"[skip] {job_id}: --download needs a token", file=sys.stderr)
                 continue
             from worker_core import resolve_repo
             ckpt_repo = resolve_repo(spec["checkpoint"]["repo"], token)
@@ -411,8 +420,9 @@ def main() -> int:
                 manifest = json.loads(Path(mpath).read_text(encoding="utf-8"))
                 manifest_p.parent.mkdir(parents=True, exist_ok=True)
                 manifest_p.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
-                for c in manifest["chunks"]:
+                for ci, c in enumerate(manifest["chunks"]):
                     if c["status"] == "done":
+                        log(f"  [download] {job_id}/{c['chunk_id']}.jsonl ...")
                         cp = hf_hub_download(repo_id=ckpt_repo,
                                              filename=f"{job_id}/{c['chunk_id']}.jsonl",
                                              repo_type="dataset", token=token)
@@ -421,23 +431,23 @@ def main() -> int:
                         if not dst.exists():
                             import shutil
                             shutil.copy(cp, dst)
-                print(f"[download] {job_id}: chunks fetched from {ckpt_repo}")
+                log(f"[download] {job_id}: chunks fetched from {ckpt_repo}")
             except Exception as e:  # noqa: BLE001
-                print(f"[skip] {job_id}: no remote checkpoint ({type(e).__name__}: {str(e)[:150]})")
+                log(f"[skip] {job_id}: no remote checkpoint ({type(e).__name__}: {str(e)[:150]})")
                 continue
 
         if not manifest_p.exists():
-            print(f"[skip] {job_id}: no manifest (job not run)")
+            log(f"[skip] {job_id}: no manifest (job not run)")
             continue
         manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
         done = [c for c in manifest["chunks"] if c["status"] == "done"]
         src_repo = spec["data_source"].get("repo") or spec["data_source"].get("url", "unknown")
         if src_repo in excluded:
-            print(f"[excluded] {job_id} ({src_repo}) — purged from this release")
+            log(f"[excluded] {job_id} ({src_repo}) — purged from this release")
             continue
         used_sources.add(src_repo)
         spec_lang = (spec.get("metadata") or {}).get("lang")
-        print(f"[merge] {job_id}: {len(done)} chunks from {src_repo}"
+        log(f"[merge] {job_id}: {len(done)} chunks from {src_repo}"
               + (f" (spec lang: {spec_lang})" if spec_lang else ""))
         raw_out = None
         raw_n = 0
@@ -449,8 +459,9 @@ def main() -> int:
         for c in done:
             chunk_p = workdir / job_id / f"{c['chunk_id']}.jsonl"
             if not chunk_p.exists():
-                print(f"  [warn] chunk file missing: {chunk_p.name}")
+                log(f"  [warn] chunk file missing: {chunk_p.name}")
                 continue
+            log(f"  [merge] {job_id}/{c['chunk_id']}.jsonl ...")
             with open(chunk_p, encoding="utf-8") as fh:
                 for line in fh:
                     try:
@@ -522,7 +533,7 @@ def main() -> int:
     if args.curated:
         cpath = Path(args.curated)
         if not cpath.exists():
-            print(f"[error] curated file not found: {cpath}", file=sys.stderr)
+            log(f"[error] curated file not found: {cpath}", file=sys.stderr)
             return 1
         with open(cpath, encoding="utf-8") as fh:
             for i, line in enumerate(fh, 1):
@@ -536,7 +547,7 @@ def main() -> int:
                 conv_source[cid] = "humn_curated"
                 n_curated += 1
         used_sources.add("humn_curated")
-        print(f"[curated] accepted={n_curated} skipped={n_curated_bad} from {cpath.name}")
+        log(f"[curated] accepted={n_curated} skipped={n_curated_bad} from {cpath.name}")
 
     # emit grouped chat conversations (sorted by turn index) into per-lang splits
     n_chat = 0
@@ -570,14 +581,14 @@ def main() -> int:
     avg_chars = _char_sum / _char_n if _char_n else 0
     med_chars = sorted(_len_reservoir)[len(_len_reservoir) // 2] if _len_reservoir else 0
     total_in = total_rows + n_dup + n_norm_dup
-    print(f"\n[merged] {total_rows:,} canonical rows "
+    log(f"\n[merged] {total_rows:,} canonical rows "
           f"(exact-dup removed: {n_dup:,}, normalized near-dup removed: {n_norm_dup:,})")
     for split in sorted(split_counts):
-        print(f"  {split}: {split_counts[split]:,} rows")
-    print(f"[quality] avg_len={avg_chars:.0f} chars, median_len~{med_chars}, "
+        log(f"  {split}: {split_counts[split]:,} rows")
+    log(f"[quality] avg_len={avg_chars:.0f} chars, median_len~{med_chars}, "
           f"emoji_rows={_emoji_rows:,}, url_rows={_url_rows:,}")
     if flag_counter:
-        print("[flags] " + ", ".join(f"{k}={v:,}" for k, v in flag_counter.most_common()))
+        log("[flags] " + ", ".join(f"{k}={v:,}" for k, v in flag_counter.most_common()))
 
     for split in sorted(split_counts):
         composition.append(f"- {split}/train-*.jsonl: {split_counts[split]:,} rows")
@@ -591,7 +602,7 @@ def main() -> int:
         for repo, (lic, url) in ATTRIBUTIONS.items() if repo in used_sources)
     unknown_src = sorted(used_sources - set(ATTRIBUTIONS))
     if unknown_src:
-        print(f"  [warn] sources missing from ATTRIBUTIONS: {unknown_src}")
+        log(f"  [warn] sources missing from ATTRIBUTIONS: {unknown_src}")
         sources_txt += "\n" + "\n".join(f"- {repo} — license: see source page" for repo in unknown_src)
     size_cat = "<1K" if total_rows < 1_000 else "1K<n<10K" if total_rows < 10_000 else \
                "10K<n<100K" if total_rows < 100_000 else "100K<n<1M" if total_rows < 1_000_000 else "1M<n<10M"
@@ -613,24 +624,24 @@ def main() -> int:
                        sources=sources_txt, langmix=langmix_txt, quality=quality_txt)
     card_p = workdir / "final" / "README.md"
     card_p.write_text(card, encoding="utf-8")
-    print(f"[card] {card_p}")
+    log(f"[card] {card_p}")
 
     if args.upload:
         if not token:
-            print("[error] no HF token for upload", file=sys.stderr)
+            log("[error] no HF token for upload", file=sys.stderr)
             return 1
         from worker_core import hf_upload_file
         # upload preserving relative paths: pretrain/, sft_chat/, raw/<job>/, README
         for rel in sorted((workdir / "final").rglob("*.jsonl")):
             rel_path = rel.relative_to(workdir / "final").as_posix()
             if rel.stat().st_size == 0:
-                print(f"  [skip empty] {rel_path}")
+                log(f"  [skip empty] {rel_path}")
                 continue
             hf_upload_file(args.out_repo, rel, rel_path, token)
         hf_upload_file(args.out_repo, card_p, "README.md", token)
-        print(f"\n[UPLOADED] https://huggingface.co/datasets/{args.out_repo}")
+        log(f"\n[UPLOADED] https://huggingface.co/datasets/{args.out_repo}")
     else:
-        print(f"\n[dev] files ready in {workdir / 'final'} (no upload; add --upload --token <hf_write_token>)")
+        log(f"\n[dev] files ready in {workdir / 'final'} (no upload; add --upload --token <hf_write_token>)")
     return 0
 
 
