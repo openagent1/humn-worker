@@ -81,6 +81,9 @@ def main() -> int:
     ap.add_argument("--dataset-version", default="v1")
     ap.add_argument("--token", default=None)
     ap.add_argument("--workdir", default="finalize-work")
+    ap.add_argument("--make-public", action=argparse.BooleanOptionalAction, default=False,
+                    help="flip the output repo to public BEFORE uploading "
+                         "(public repos don't consume private storage quota)")
     ap.add_argument("--parts-dir", default="",
                     help="offline test: local dir containing <leg>/ subdirs, skip download")
     args = ap.parse_args()
@@ -92,6 +95,22 @@ def main() -> int:
         return 1
     out_repo = resolve(args.out_repo, token, "out", args.dataset_version)
     print(f"[finalize] {legs} -> {out_repo}", flush=True)
+
+    if args.make_public:
+        # Public repos don't consume the private storage quota that just
+        # killed a 16GB upload. Flip (or create) BEFORE uploading anything.
+        if not token:
+            print("[error] --make-public needs a token", file=sys.stderr)
+            return 1
+        from huggingface_hub import HfApi  # type: ignore
+
+        api = HfApi(token=token)
+        try:
+            api.update_repo_visibility(repo_id=out_repo, private=False)
+            print(f"[finalize] {out_repo} is now PUBLIC", flush=True)
+        except Exception as e:  # noqa: BLE001 - repo may not exist yet
+            print(f"[finalize] visibility flip failed ({str(e)[:120]}), creating public repo", flush=True)
+            api.create_repo(out_repo, repo_type="dataset", private=False, exist_ok=True)
 
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)

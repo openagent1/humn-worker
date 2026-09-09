@@ -15,6 +15,10 @@ on:
         description: 'Comma-separated source repos to purge from public release'
         required: false
         default: 'lmsys/lmsys-chat-1m'
+      make_public:
+        description: 'Make the release repo public before uploading (avoids private storage quota)'
+        required: false
+        default: 'true'
 
 permissions:
   contents: read
@@ -109,7 +113,8 @@ jobs:
             --legs chat,social,web \
             --out-repo auto \
             --dataset-version "${{ inputs.dataset_version }}" \
-            --token "$HF_TOKEN_RW"
+            --token "$HF_TOKEN_RW" \
+            ${{ inputs.make_public == 'true' && '--make-public' || '--no-make-public' }}
 
       - name: Summary
         run: echo "v1 released. Check your Hugging Face profile > Datasets."
